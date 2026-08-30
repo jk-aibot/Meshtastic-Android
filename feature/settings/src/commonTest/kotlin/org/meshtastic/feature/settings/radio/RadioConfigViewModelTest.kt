@@ -1852,6 +1852,27 @@ class RadioConfigViewModelTest {
     }
 
     @Test
+    fun `installProfile surfaces malformed channel URL in snackbar`() = runTest {
+        val node = Node(num = 123, user = User(id = "!123"))
+        nodeRepository.setNodes(listOf(node))
+        viewModel = createViewModel()
+        val profile = DeviceProfile(channel_url = "not-a-channel-url")
+        everySuspend { installProfileUseCase(any(), any(), any(), any(), any()) } calls
+            {
+                throw MalformedMeshtasticUrlException("bad profile")
+            }
+        // UiText.resolve() loads the string on real Dispatchers.Default, outside the test scheduler,
+        // so await the snackbar call instead of draining with runCurrent().
+        val snackbarShown = CompletableDeferred<Unit>()
+        every { snackbarManager.showSnackbar(any(), any(), any(), any(), any()) } calls { snackbarShown.complete(Unit) }
+
+        viewModel.installProfile(profile)
+        snackbarShown.await()
+
+        verify { snackbarManager.showSnackbar(message = "This Channel URL is invalid and can not be used") }
+    }
+
+    @Test
     fun `processPacketResponse updates state on various results`() = runTest {
         val node = Node(num = 123, user = User.Builder().also { wb -> wb.id = "!123" }.build())
         nodeRepository.setNodes(listOf(node))

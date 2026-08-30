@@ -73,11 +73,11 @@ private fun LocalModuleConfig?.withoutUnchangedFields(current: LocalModuleConfig
 internal fun LocalConfig?.withoutTransportSensitiveConfig(): LocalConfig? =
     this
         ?.newBuilder()
-        ?.also { wb ->
+        .also { wb ->
             wb.bluetooth = null
             wb.network = null
         }
-        ?.build()
+        .build()
         ?.takeIf { it.hasInstallableWrites() }
 
 internal fun LocalConfig.hasInstallableWrites(): Boolean = installableConfigs().isNotEmpty()
@@ -85,11 +85,11 @@ internal fun LocalConfig.hasInstallableWrites(): Boolean = installableConfigs().
 internal fun LocalModuleConfig?.withoutTransportSensitiveModules(): LocalModuleConfig? =
     this
         ?.newBuilder()
-        ?.also { wb ->
+        .also { wb ->
             wb.mqtt = null
             wb.serial = null
         }
-        ?.build()
+        .build()
         ?.takeIf { it.hasInstallableWrites() }
 
 internal fun LocalModuleConfig.hasInstallableWrites(): Boolean = moduleConfigs().isNotEmpty()
@@ -117,11 +117,11 @@ internal fun LocalConfig.withoutSecretSecurityBytes(): LocalConfig =
             wb.security =
                 security
                     ?.newBuilder()
-                    ?.also { sec ->
+                    .also { sec ->
                         sec.private_key = ByteString.EMPTY
                         sec.public_key = ByteString.EMPTY
                     }
-                    ?.build()
+                    .build()
         }
         .build()
 

@@ -190,7 +190,7 @@ private fun DeviceProfile.transportSensitivePlan(activeTransport: DeviceType): T
     }
 
     return TransportSensitivePlan(
-        mqtt = module_config?.mqtt?.let { ModuleConfig.Builder().also { wb -> wb.mqtt = it }.build() },
+        mqtt = module_config?.mqtt?.let { ModuleConfig.Builder().also { wb -> wb.mqtt = it) },
         continuingStages = continuingStages,
         terminalStages = terminalStages,
         groupedTerminalConfig = groupedTerminalConfig,
