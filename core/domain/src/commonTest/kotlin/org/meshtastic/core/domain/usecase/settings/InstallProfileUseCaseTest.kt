@@ -16,6 +16,7 @@
  */
 package org.meshtastic.core.domain.usecase.settings
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
@@ -336,7 +337,7 @@ class InstallProfileUseCaseTest {
         wb.display = DisplayConfig(compass_north_top = true)
         wb.lora = LoRaConfig(region = LoRaConfig.RegionCode.US)
         wb.bluetooth = BluetoothConfig(enabled = true)
-        wb.security = SecurityConfig.Builder().build()
+        wb.security = SecurityConfig()
         wb.version = 7
     }.build()
         val currentModuleConfig =
@@ -645,7 +646,7 @@ class InstallProfileUseCaseTest {
     @Test
     fun `transport stages retarget the current local identity after each reconnect`() = runTest(testDispatcher) {
         radioConfigRepository.setLocalConfigDirect(
-            LocalConfig.Builder().also { wb -> wb.security = SecurityConfig.Builder().also { wb -> wb.private_key = ByteArray(32) { 7 }.toByteString() }.build() }.build(),
+            LocalConfig.Builder().also { wb -> wb.security = SecurityConfig(private_key = ByteArray(32) { 7 }.toByteString()) }.build(),
         )
         radioController.onEditSettingsCommitted = {
             nodeRepository.setMyNodeInfo(TestDataFactory.createMyNodeInfo(myNodeNum = 5678))
@@ -661,7 +662,7 @@ class InstallProfileUseCaseTest {
         val profile =
             DeviceProfile.Builder().also { wb ->
         wb.config = LocalConfig.Builder().also { wb ->
-        wb.security = SecurityConfig.Builder().also { wb -> wb.is_managed = true }.build()
+        wb.security = SecurityConfig(is_managed = true)
         wb.bluetooth = BluetoothConfig(enabled = true)
     }.build()
         wb.module_config = LocalModuleConfig.Builder().also { wb ->
@@ -682,20 +683,17 @@ class InstallProfileUseCaseTest {
     fun `security restore overlays the running private key when the imported key is invalid`() =
         runTest(testDispatcher) {
             radioConfigRepository.setLocalConfigDirect(
-                LocalConfig.Builder().also { wb -> wb.security = SecurityConfig.Builder().also { wb ->
-        wb.private_key = securityKey(32, 7)
-        wb.public_key = securityKey(32, 9)
-    }.build() }.build(),
+                LocalConfig.Builder().also { wb -> wb.security = SecurityConfig(private_key = securityKey(32, 7), public_key = securityKey(32, 9)) }.build(),
             )
             radioController.onEditSettingsCommitted = { commitAndRestart() }
             val importedAdminKeys = listOf(securityKey(32, 1), securityKey(32, 2))
             val requested =
-                SecurityConfig.Builder().also { wb ->
-        wb.private_key = securityKey(16, 5)
-        wb.is_managed = true
-        wb.admin_channel_enabled = true
-        wb.admin_key = importedAdminKeys
-    }.build()
+                SecurityConfig(
+                    private_key = securityKey(16, 5),
+                    is_managed = true,
+                    admin_channel_enabled = true,
+                    admin_key = importedAdminKeys,
+                )
             val profile = DeviceProfile.Builder().also { wb -> wb.config = LocalConfig.Builder().also { wb -> wb.security = requested }.build() }.build()
 
             useCase(1234, profile, User.Builder().build(), isLocal = true)
@@ -712,19 +710,11 @@ class InstallProfileUseCaseTest {
     @Test
     fun `security restore sends an imported valid private key and clears the public key`() = runTest(testDispatcher) {
         radioConfigRepository.setLocalConfigDirect(
-            LocalConfig.Builder().also { wb -> wb.security = SecurityConfig.Builder().also { wb ->
-        wb.private_key = securityKey(32, 7)
-        wb.public_key = securityKey(32, 9)
-    }.build() }.build(),
+            LocalConfig.Builder().also { wb -> wb.security = SecurityConfig(private_key = securityKey(32, 7), public_key = securityKey(32, 9)) }.build(),
         )
         radioController.onEditSettingsCommitted = { commitAndRestart() }
         val profile =
-            DeviceProfile.Builder().also { wb -> wb.config = LocalConfig.Builder().also { wb -> wb.security = SecurityConfig.Builder().also { wb ->
-        wb.private_key = securityKey(32, 2)
-        wb.public_key = securityKey(32, 8)
-        wb.is_managed = true
-        wb.packet_signature_policy = SecurityConfig.PacketSignaturePolicy.PACKET_SIGNATURE_POLICY_BALANCED
-    }.build() }.build() }.build()
+            DeviceProfile.Builder().also { wb -> wb.config = LocalConfig.Builder().also { wb -> wb.security = SecurityConfig( private_key = securityKey(32, 2), public_key = securityKey(32, 8), is_managed = true, packet_signature_policy = SecurityConfig.PacketSignaturePolicy.PACKET_SIGNATURE_POLICY_BALANCED, ) }.build() }.build()
 
         useCase(1234, profile, User.Builder().build(), isLocal = true)
 
@@ -741,16 +731,10 @@ class InstallProfileUseCaseTest {
     @Test
     fun `security restore is skipped when the overlaid section matches the running config`() = runTest(testDispatcher) {
         radioConfigRepository.setLocalConfigDirect(
-            LocalConfig.Builder().also { wb -> wb.security = SecurityConfig.Builder().also { wb ->
-        wb.private_key = securityKey(32, 7)
-        wb.is_managed = true
-    }.build() }.build(),
+            LocalConfig.Builder().also { wb -> wb.security = SecurityConfig(private_key = securityKey(32, 7), is_managed = true) }.build(),
         )
         val profile =
-            DeviceProfile.Builder().also { wb -> wb.config = LocalConfig.Builder().also { wb -> wb.security = SecurityConfig.Builder().also { wb ->
-        wb.private_key = securityKey(16, 5)
-        wb.is_managed = true
-    }.build() }.build() }.build()
+            DeviceProfile.Builder().also { wb -> wb.config = LocalConfig.Builder().also { wb -> wb.security = SecurityConfig(private_key = securityKey(16, 5), is_managed = true) }.build() }.build()
 
         useCase(1234, profile, User.Builder().build(), isLocal = true)
 
@@ -761,7 +745,7 @@ class InstallProfileUseCaseTest {
     @Test
     fun `security restore is not written when the profile has no security section`() = runTest(testDispatcher) {
         radioConfigRepository.setLocalConfigDirect(
-            LocalConfig.Builder().also { wb -> wb.security = SecurityConfig.Builder().also { wb -> wb.private_key = securityKey(32, 7) }.build() }.build(),
+            LocalConfig.Builder().also { wb -> wb.security = SecurityConfig(private_key = securityKey(32, 7)) }.build(),
         )
         radioController.onEditSettingsCommitted = { commitAndRestart() }
         val profile = DeviceProfile.Builder().also { wb -> wb.config = LocalConfig.Builder().also { wb -> wb.lora = LoRaConfig(region = LoRaConfig.RegionCode.US) }.build() }.build()
@@ -775,21 +759,18 @@ class InstallProfileUseCaseTest {
     fun `security restore sends requested security unchanged when neither side has a valid private key`() =
         runTest(testDispatcher) {
             radioConfigRepository.setLocalConfigDirect(
-                LocalConfig.Builder().also { wb -> wb.security = SecurityConfig.Builder().also { wb ->
-        wb.private_key = securityKey(16, 6)
-        wb.public_key = securityKey(31, 7)
-    }.build() }.build(),
+                LocalConfig.Builder().also { wb -> wb.security = SecurityConfig(private_key = securityKey(16, 6), public_key = securityKey(31, 7)) }.build(),
             )
             radioController.onEditSettingsCommitted = { commitAndRestart() }
             val requested =
-                SecurityConfig.Builder().also { wb ->
-        wb.private_key = securityKey(31, 1)
-        wb.public_key = securityKey(16, 2)
-        wb.is_managed = true
-        wb.serial_enabled = false
-        wb.admin_channel_enabled = false
-        wb.packet_signature_policy = SecurityConfig.PacketSignaturePolicy.PACKET_SIGNATURE_POLICY_STRICT
-    }.build()
+                SecurityConfig(
+                    private_key = securityKey(31, 1),
+                    public_key = securityKey(16, 2),
+                    is_managed = true,
+                    serial_enabled = false,
+                    admin_channel_enabled = false,
+                    packet_signature_policy = SecurityConfig.PacketSignaturePolicy.PACKET_SIGNATURE_POLICY_STRICT,
+                )
             val profile = DeviceProfile.Builder().also { wb -> wb.config = LocalConfig.Builder().also { wb -> wb.security = requested }.build() }.build()
 
             useCase(1234, profile, User.Builder().build(), isLocal = true)
@@ -917,6 +898,129 @@ class InstallProfileUseCaseTest {
 
         assertEquals(channelLora, radioController.configWrites.single().config.lora)
         assertEquals(settings, radioConfigRepository.currentChannelSet.settings)
+    }
+
+    @Test
+    fun `channel replacement rewrites every slot in order and refreshes the cache after commit`() =
+        runTest(testDispatcher) {
+            val staleSettings =
+                (0 until 4).map { index ->
+                    ChannelSettings.Builder().also { wb ->
+        wb.name = "Stale $index"
+        wb.psk = byteArrayOf(index.toByte()).toByteString()
+    }.build()
+                }
+            radioConfigRepository.setChannelSet(ChannelSet.Builder().also { wb -> wb.settings = staleSettings }.build())
+            val importedSettings =
+                listOf(
+                    ChannelSettings.Builder().also { wb ->
+        wb.name = "Imported"
+        wb.psk = byteArrayOf(1).toByteString()
+    }.build(),
+                    ChannelSettings.Builder().also { wb ->
+        wb.name = "Private"
+        wb.psk = byteArrayOf(2).toByteString()
+    }.build(),
+                )
+            val channelUrl = ChannelSet.Builder().also { wb -> wb.settings = importedSettings }.build().getChannelUrl().toString()
+            var cacheAtCommit: List<ChannelSettings>? = null
+            radioController.onEditSettingsCommitted = {
+                cacheAtCommit = radioConfigRepository.currentChannelSet.settings
+                emitRestartCycle()
+            }
+
+            useCase(1234, DeviceProfile.Builder().also { wb -> wb.channel_url = channelUrl }.build(), User.Builder().build(), isLocal = true)
+
+            // The imported set is authoritative: slots 0..1 carry it and every stale trailing slot is disabled so it
+            // cannot survive the replacement.
+            assertEquals(
+                (0 until CHANNEL_REPLACEMENT_SLOT_COUNT).map { index ->
+                    Channel(
+                        role =
+                        when (index) {
+                            0 -> Channel.Role.PRIMARY
+                            1 -> Channel.Role.SECONDARY
+                            else -> Channel.Role.DISABLED
+                        },
+                        index = index,
+                        settings = importedSettings.getOrNull(index) ?: ChannelSettings.Builder().build(),
+                    )
+                },
+                radioController.localChannels,
+            )
+            assertEquals(staleSettings, cacheAtCommit)
+            assertEquals(
+                listOf(FakeRadioConfigRepository.ChannelSetUpdate(importedSettings, null)),
+                radioConfigRepository.channelSetUpdates,
+            )
+            assertEquals(importedSettings, radioConfigRepository.currentChannelSet.settings)
+            assertFalse(restartTracker.restartExpected.value)
+        }
+
+    @Test
+    fun `failed channel write aborts the install without claiming the imported set`() = runTest(testDispatcher) {
+        val staleSettings = listOf(ChannelSettings.Builder().also { wb -> wb.name = "Old" }.build(), ChannelSettings.Builder().also { wb -> wb.name = "Stale" }.build())
+        radioConfigRepository.setChannelSet(ChannelSet.Builder().also { wb -> wb.settings = staleSettings }.build())
+        val importedSettings = listOf(ChannelSettings.Builder().also { wb ->
+        wb.name = "Imported"
+        wb.psk = byteArrayOf(1).toByteString()
+    }.build())
+        val channelUrl = ChannelSet.Builder().also { wb -> wb.settings = importedSettings }.build().getChannelUrl().toString()
+        radioController.failChannelWriteAfter = 1
+
+        assertFailsWith<IllegalStateException> {
+            useCase(1234, DeviceProfile.Builder().also { wb -> wb.channel_url = channelUrl }.build(), User.Builder().build(), isLocal = true)
+        }
+
+        assertEquals(listOf(0), radioController.localChannels.map(Channel::index))
+        assertTrue(radioConfigRepository.channelSetUpdates.isEmpty())
+        assertEquals(staleSettings, radioConfigRepository.currentChannelSet.settings)
+        assertFalse(restartTracker.restartExpected.value)
+    }
+
+    @Test
+    fun `cancelling inside the transaction leaves the channel cache at the previous set`() = runTest(testDispatcher) {
+        val staleSettings = listOf(ChannelSettings.Builder().also { wb -> wb.name = "Old" }.build())
+        radioConfigRepository.setChannelSet(ChannelSet.Builder().also { wb -> wb.settings = staleSettings }.build())
+        val importedSettings = listOf(ChannelSettings.Builder().also { wb ->
+        wb.name = "Imported"
+        wb.psk = byteArrayOf(1).toByteString()
+    }.build())
+        val channelUrl = ChannelSet.Builder().also { wb -> wb.settings = importedSettings }.build().getChannelUrl().toString()
+        radioController.onSetFixedPosition = { _, _ -> throw CancellationException("Cancelled before commit") }
+        val profile =
+            DeviceProfile.Builder().also { wb ->
+        wb.channel_url = channelUrl
+        wb.fixed_position = org.meshtastic.proto.Position.Builder().also { wb ->
+        wb.latitude_i = 1
+        wb.longitude_i = 2
+    }.build()
+    }.build()
+        val installation = launch { useCase(1234, profile, User.Builder().build(), isLocal = true) }
+
+        installation.join()
+
+        assertTrue(installation.isCancelled)
+        assertTrue(radioController.localChannels.isNotEmpty())
+        assertTrue(radioConfigRepository.channelSetUpdates.isEmpty())
+        assertEquals(staleSettings, radioConfigRepository.currentChannelSet.settings)
+        assertFalse(restartTracker.restartExpected.value)
+    }
+
+    @Test
+    fun `oversized channel URL fails before any device write`() = runTest(testDispatcher) {
+        val oversized =
+            (0..CHANNEL_REPLACEMENT_SLOT_COUNT).map { index ->
+                ChannelSettings.Builder().also { wb ->
+        wb.name = "Channel $index"
+        wb.psk = byteArrayOf(index.toByte()).toByteString()
+    }.build()
+            }
+        val profile = DeviceProfile.Builder().also { wb -> wb.channel_url = ChannelSet.Builder().also { wb -> wb.settings = oversized }.build().getChannelUrl().toString() }.build()
+
+        assertFailsWith<MalformedMeshtasticUrlException> { useCase(1234, profile, User.Builder().build(), isLocal = true) }
+
+        assertNoDeviceWrites()
     }
 
     @Test
@@ -1083,7 +1187,7 @@ class InstallProfileUseCaseTest {
         wb.display = DisplayConfig()
         wb.lora = LoRaConfig(region = LoRaConfig.RegionCode.US)
         wb.bluetooth = BluetoothConfig(enabled = true)
-        wb.security = SecurityConfig.Builder().build()
+        wb.security = SecurityConfig()
     }.build()
         wb.module_config = LocalModuleConfig.Builder().also { wb ->
         wb.mqtt = MQTTConfig(enabled = true)
