@@ -142,6 +142,11 @@ class FakeRadioInterfaceService(override val serviceScope: CoroutineScope = Main
     var rejectAdmittedSends: Boolean = false
 
     var connectCalled = false
+
+    /** Set when [disconnect] tears the transport down; models an intentional, non-reconnecting session end. */
+    var disconnectCalled = false
+        private set
+
     var restartTransportCalled: Boolean = false
         private set
 
@@ -172,6 +177,7 @@ class FakeRadioInterfaceService(override val serviceScope: CoroutineScope = Main
 
     override suspend fun disconnect() {
         connectCalled = false
+        disconnectCalled = true
         revokeActiveSession()
     }
 
