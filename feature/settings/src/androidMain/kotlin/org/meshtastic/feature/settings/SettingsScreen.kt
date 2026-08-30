@@ -94,6 +94,18 @@ import org.meshtastic.feature.settings.search.SettingsSearchViewModel
 import org.meshtastic.feature.settings.util.LanguageUtils
 import org.meshtastic.feature.settings.util.LanguageUtils.languageMap
 import org.meshtastic.feature.settings.util.deviceProfileExportFileName
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.navigationevent.NavigationEventInfo
+import androidx.navigationevent.compose.NavigationBackHandler
+import androidx.navigationevent.compose.rememberNavigationEventState
+import org.meshtastic.core.domain.usecase.settings.ProfileInstallOutcome
+import org.meshtastic.core.resources.profile_install_failed
+import org.meshtastic.core.resources.profile_install_succeeded
+import org.meshtastic.core.resources.profile_transport_handoff_notice
+import org.meshtastic.core.ui.util.SnackbarManager
+import org.meshtastic.feature.settings.radio.ProfileInstallState
+import org.meshtastic.feature.settings.radio.component.ProfileInstallOverlay
 import org.meshtastic.proto.DeviceProfile
 import kotlin.time.Instant.Companion.fromEpochMilliseconds
 
@@ -107,6 +119,7 @@ fun SettingsScreen(
     onBack: (() -> Unit)? = null,
 ) {
     val appFunctionsAvailable: Boolean = koinInject(qualifier = named(GOOGLE_SERVICES_AVAILABLE))
+    val snackbarManager: SnackbarManager = koinInject()
     val hiddenFeaturesUnlocked by settingsViewModel.hiddenFeaturesUnlocked.collectAsStateWithLifecycle()
     val localConfig by settingsViewModel.localConfig.collectAsStateWithLifecycle()
     val ourNode by settingsViewModel.ourNodeInfo.collectAsStateWithLifecycle()
@@ -115,6 +128,17 @@ fun SettingsScreen(
     val showFullMessageTimestamps by settingsViewModel.showFullMessageTimestamps.collectAsStateWithLifecycle()
     val destNode by viewModel.destNode.collectAsStateWithLifecycle()
     val state by viewModel.radioConfigState.collectAsStateWithLifecycle()
+    val profileInstallState by viewModel.profileInstallState.collectAsStateWithLifecycle()
+    val profileInstallSucceededMessage = stringResource(Res.string.profile_install_succeeded)
+    val profileInstallFailedMessage = stringResource(Res.string.profile_install_failed)
+    val profileTransportHandoffMessage = stringResource(Res.string.profile_transport_handoff_notice)
+    val profileInstallBackHandlerState = rememberNavigationEventState(NavigationEventInfo.None)
+    // Interrupting staged writes can leave a partial profile, so keep this screen active until the install is idle.
+    NavigationBackHandler(
+        state = profileInstallBackHandlerState,
+        isBackEnabled = profileInstallState !is ProfileInstallState.Idle,
+        onBackCompleted = {},
+    )
 
     var deviceProfile by remember { mutableStateOf<DeviceProfile?>(null) }
     var showEditDeviceProfileDialog by remember { mutableStateOf(false) }
@@ -150,7 +174,19 @@ fun SettingsScreen(
             onConfirm = {
                 showEditDeviceProfileDialog = false
                 if (deviceProfile != null) {
-                    viewModel.installProfile(it)
+                    viewModel.installProfile(it) { result ->
+                        val message =
+                            result.fold(
+                                onSuccess = { outcome ->
+                                    when (outcome) {
+                                        ProfileInstallOutcome.Completed -> profileInstallSucceededMessage
+                                        ProfileInstallOutcome.TransportHandedOff -> profileTransportHandoffMessage
+                                    }
+                                },
+                                onFailure = { profileInstallFailedMessage },
+                            )
+                        snackbarManager.showSnackbar(message = message)
+                    }
                 } else {
                     deviceProfile = it
                     val dateStr =
@@ -205,154 +241,163 @@ fun SettingsScreen(
         )
     }
 
-    Scaffold(
-        topBar = {
-            // Show back arrow when remotely administering (caller supplies onBack and we're not on the local node).
-            val showBack = onBack != null && !state.isLocal
-            RadioAdminAppBar(
-                title = stringResource(Res.string.bottom_nav_settings),
-                isLocal = state.isLocal,
-                destNode = destNode,
-                onNavigateUp = { onBack?.invoke() },
-                localSubtitle = ourNode?.user?.long_name,
-                ourNode = ourNode,
-                onClickChip = { node -> onClickNodeChip(node.num) },
-                showNodeChip = ourNode != null && isConnected && state.isLocal,
-                canNavigateUp = showBack,
-            )
-        },
-    ) { paddingValues ->
-        Column(
-            modifier = Modifier.verticalScroll(rememberScrollState()).padding(paddingValues).padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            SettingsSearchBar(
-                viewModel = koinViewModel<SettingsSearchViewModel>(),
-                onNavigate = onNavigate,
-                // This phone's own settings are hidden below while administering another node; search hides them too.
-                includeAppLocal = state.isLocal,
-            )
-
-            RadioConfigItemList(
-                state = state,
-                isManaged = localConfig.security?.is_managed ?: false,
-                isOtaCapable = isOtaCapable,
-                onRouteClick = { route ->
-                    val navRoute =
-                        when (route) {
-                            is ConfigRoute -> route.route
-                            is ModuleRoute -> route.route
-                            else -> null
-                        }
-                    navRoute?.let { onNavigate(it) }
-                },
-                onImport = {
-                    viewModel.clearPacketResponse()
-                    deviceProfile = null
-                    val intent =
-                        Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                            addCategory(Intent.CATEGORY_OPENABLE)
-                            type = "application/*"
-                        }
-                    importConfigLauncher.launch(intent)
-                },
-                onExport = {
-                    viewModel.clearPacketResponse()
-                    deviceProfile = null
-                    showEditDeviceProfileDialog = true
-                },
-                onNavigate = onNavigate,
-            )
-
-            // App-local settings are only relevant when configuring the local node
-            if (state.isLocal) {
-                val provideLocation = settingsViewModel.provideLocation.collectAsStateWithLifecycle().value
-                // Ahead of the app settings block: onboarding runs once, so this is the only place a user who skipped
-                // or declined a permission can find their way back to it.
-                PermissionsSettingsContent(needsPreciseLocation = provideLocation)
-
-                ExpressiveSection(title = stringResource(Res.string.app_settings)) {
-                    PrivacySettingsContent(
-                        analyticsAvailable = appFunctionsAvailable,
-                        analyticsEnabled = viewModel.analyticsAllowedFlow.collectAsStateWithLifecycle(true).value,
-                        onToggleAnalytics = { viewModel.toggleAnalyticsAllowed() },
-                        provideLocation = provideLocation,
-                        onToggleLocation = { settingsViewModel.setProvideLocation(it) },
-                        homoglyphEnabled =
-                        viewModel.homoglyphEncodingEnabledFlow.collectAsStateWithLifecycle(false).value,
-                        onToggleHomoglyph = { viewModel.toggleHomoglyphCharactersEncodingEnabled() },
-                        startProvideLocation = { settingsViewModel.startProvidingLocation() },
-                        stopProvideLocation = { settingsViewModel.stopProvidingLocation() },
-                    )
-                    AppearanceSettingsContent(
-                        showFullMessageTimestamps = showFullMessageTimestamps,
-                        onShowFullMessageTimestampsChange = settingsViewModel::setShowFullMessageTimestamps,
-                        onShowLanguagePicker = { showLanguagePickerDialog = true },
-                        onShowThemePicker = { showThemePickerDialog = true },
-                        unitsSummary = stringResource(UnitsOption.entries.first { it.override == unitsOverride }.label),
-                        onShowUnitsPicker = { showUnitsPickerDialog = true },
-                    )
-                    PersistenceSettingsContent(
-                        cacheLimit = settingsViewModel.dbCacheLimit.collectAsStateWithLifecycle().value,
-                        onCheckCacheLimitEvictionCount = { settingsViewModel.cachedDeviceCountExceeding(it) },
-                        onSetCacheLimit = { settingsViewModel.setDbCacheLimit(it) },
-                        nodeShortName = ourNode?.user?.short_name ?: "",
-                        onExportData = { settingsViewModel.saveDataCsv(it.toKmpUri()) },
-                        onExportNodeDb = { settingsViewModel.saveNodeDbJson(it) },
-                    )
-                    ListItem(
-                        text = stringResource(Res.string.node_layout_section_title),
-                        leadingIcon = MeshtasticIcons.List,
-                    ) {
-                        onNavigate(SettingsRoute.NodeList)
-                    }
-                    // Wi-Fi provisioning reaches the device over BLE.
-                    if (isBluetoothSupported()) {
-                        ListItem(text = stringResource(Res.string.wifi_devices), leadingIcon = MeshtasticIcons.Wifi) {
-                            onNavigate(WifiProvisionRoute.WifiProvision())
-                        }
-                    }
-                    ListItem(
-                        text = stringResource(Res.string.filter_settings),
-                        leadingIcon = MeshtasticIcons.FilterList,
-                    ) {
-                        onNavigate(SettingsRoute.FilterSettings)
-                    }
-                    if (appFunctionsAvailable) {
-                        ListItem(
-                            text = stringResource(Res.string.app_functions_settings),
-                            supportingText = stringResource(Res.string.app_functions_settings_summary),
-                            leadingIcon = MeshtasticIcons.SettingsRemote,
-                        ) {
-                            onNavigate(SettingsRoute.AppFunctionsSettings)
-                        }
-                    }
-                }
-
-                AppInfoSection(
-                    appVersionName = settingsViewModel.appVersionName,
-                    hiddenFeaturesUnlocked = hiddenFeaturesUnlocked,
-                    onUnlockHiddenFeatures = { settingsViewModel.unlockHiddenFeatures() },
-                    onShowAppIntro = { settingsViewModel.showAppIntro() },
-                    onNavigateToAbout = { onNavigate(SettingsRoute.About) },
-                    onPlayChirpyHop = { onNavigate(FirmwareRoute.ChirpyHop) },
+    Box(modifier = Modifier.fillMaxSize()) {
+        Scaffold(
+            topBar = {
+                // Show back arrow when remotely administering (caller supplies onBack and we're not on the local node).
+                val showBack = onBack != null && !state.isLocal
+                RadioAdminAppBar(
+                    title = stringResource(Res.string.bottom_nav_settings),
+                    isLocal = state.isLocal,
+                    destNode = destNode,
+                    onNavigateUp = { onBack?.invoke() },
+                    localSubtitle = ourNode?.user?.long_name,
+                    ourNode = ourNode,
+                    onClickChip = { node -> onClickNodeChip(node.num) },
+                    showNodeChip = ourNode != null && isConnected && state.isLocal,
+                    canNavigateUp = showBack,
                 )
-            }
+            },
+        ) { paddingValues ->
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()).padding(paddingValues).padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                SettingsSearchBar(
+                    viewModel = koinViewModel<SettingsSearchViewModel>(),
+                    onNavigate = onNavigate,
+                    // This phone's own settings are hidden below while administering another node; search hides them too.
+                    includeAppLocal = state.isLocal,
+                )
 
-            ExpressiveSection(title = stringResource(Res.string.help_and_documentation)) {
-                ListItem(
-                    text = stringResource(Res.string.help_and_documentation),
-                    leadingIcon = MeshtasticIcons.HelpOutline,
-                ) {
-                    onNavigate(SettingsRoute.HelpDocs)
-                }
+                RadioConfigItemList(
+                    state = state,
+                    isManaged = localConfig.security?.is_managed ?: false,
+                    isOtaCapable = isOtaCapable,
+                    onRouteClick = { route ->
+                        val navRoute =
+                            when (route) {
+                                is ConfigRoute -> route.route
+                                is ModuleRoute -> route.route
+                                else -> null
+                            }
+                        navRoute?.let { onNavigate(it) }
+                    },
+                    onImport = {
+                        viewModel.clearPacketResponse()
+                        deviceProfile = null
+                        val intent =
+                            Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                                addCategory(Intent.CATEGORY_OPENABLE)
+                                type = "application/*"
+                            }
+                        importConfigLauncher.launch(intent)
+                    },
+                    onExport = {
+                        viewModel.clearPacketResponse()
+                        deviceProfile = null
+                        showEditDeviceProfileDialog = true
+                    },
+                    onNavigate = onNavigate,
+                )
+
+                // App-local settings are only relevant when configuring the local node
                 if (state.isLocal) {
-                    ListItem(text = stringResource(Res.string.device_links), leadingIcon = MeshtasticIcons.Device) {
-                        onNavigate(SettingsRoute.DeviceLinks)
+                    val provideLocation = settingsViewModel.provideLocation.collectAsStateWithLifecycle().value
+                    // Ahead of the app settings block: onboarding runs once, so this is the only place a user who skipped
+                    // or declined a permission can find their way back to it.
+                    PermissionsSettingsContent(needsPreciseLocation = provideLocation)
+||||||| parent of 0e7ee3ec14 (fix(settings): surface staged profile install progress)
+                    // Ahead of the app settings block: onboarding runs once, so this is the only place a user who skipped
+                    // or declined a permission can find their way back to it.
+                    PermissionsSettingsContent()
+
+                    ExpressiveSection(title = stringResource(Res.string.app_settings)) {
+                        PrivacySettingsContent(
+                            analyticsAvailable = appFunctionsAvailable,
+                            analyticsEnabled = viewModel.analyticsAllowedFlow.collectAsStateWithLifecycle(true).value,
+                            onToggleAnalytics = { viewModel.toggleAnalyticsAllowed() },
+                            provideLocation = provideLocation,
+                            onToggleLocation = { settingsViewModel.setProvideLocation(it) },
+                            homoglyphEnabled =
+                            viewModel.homoglyphEncodingEnabledFlow.collectAsStateWithLifecycle(false).value,
+                            onToggleHomoglyph = { viewModel.toggleHomoglyphCharactersEncodingEnabled() },
+                            startProvideLocation = { settingsViewModel.startProvidingLocation() },
+                            stopProvideLocation = { settingsViewModel.stopProvidingLocation() },
+                        )
+                        AppearanceSettingsContent(
+                            showFullMessageTimestamps = showFullMessageTimestamps,
+                            onShowFullMessageTimestampsChange = settingsViewModel::setShowFullMessageTimestamps,
+                            onShowLanguagePicker = { showLanguagePickerDialog = true },
+                            onShowThemePicker = { showThemePickerDialog = true },
+                            unitsSummary =
+                            stringResource(UnitsOption.entries.first { it.override == unitsOverride }.label),
+                            onShowUnitsPicker = { showUnitsPickerDialog = true },
+                        )
+                        PersistenceSettingsContent(
+                            cacheLimit = settingsViewModel.dbCacheLimit.collectAsStateWithLifecycle().value,
+                            onCheckCacheLimitEvictionCount = { settingsViewModel.cachedDeviceCountExceeding(it) },
+                            onSetCacheLimit = { settingsViewModel.setDbCacheLimit(it) },
+                            nodeShortName = ourNode?.user?.short_name ?: "",
+                            onExportData = { settingsViewModel.saveDataCsv(it.toKmpUri()) },
+                            onExportNodeDb = { settingsViewModel.saveNodeDbJson(it) },
+                        )
+                        ListItem(
+                            text = stringResource(Res.string.node_layout_section_title),
+                            leadingIcon = MeshtasticIcons.List,
+                        ) {
+                            onNavigate(SettingsRoute.NodeList)
+                        }
+                        // Wi-Fi provisioning reaches the device over BLE.
+                        if (isBluetoothSupported()) {
+                            ListItem(text = stringResource(Res.string.wifi_devices), leadingIcon = MeshtasticIcons.Wifi) {
+                                onNavigate(WifiProvisionRoute.WifiProvision())
+                            }
+                        }
+                        ListItem(
+                            text = stringResource(Res.string.filter_settings),
+                            leadingIcon = MeshtasticIcons.FilterList,
+                        ) {
+                            onNavigate(SettingsRoute.FilterSettings)
+                        }
+                        if (appFunctionsAvailable) {
+                            ListItem(
+                                text = stringResource(Res.string.app_functions_settings),
+                                supportingText = stringResource(Res.string.app_functions_settings_summary),
+                                leadingIcon = MeshtasticIcons.SettingsRemote,
+                            ) {
+                                onNavigate(SettingsRoute.AppFunctionsSettings)
+                            }
+                        }
+                    }
+
+                    AppInfoSection(
+                        appVersionName = settingsViewModel.appVersionName,
+                        hiddenFeaturesUnlocked = hiddenFeaturesUnlocked,
+                        onUnlockHiddenFeatures = { settingsViewModel.unlockHiddenFeatures() },
+                        onShowAppIntro = { settingsViewModel.showAppIntro() },
+                        onNavigateToAbout = { onNavigate(SettingsRoute.About) },
+                        onPlayChirpyHop = { onNavigate(FirmwareRoute.ChirpyHop) },
+                    )
+                }
+
+                ExpressiveSection(title = stringResource(Res.string.help_and_documentation)) {
+                    ListItem(
+                        text = stringResource(Res.string.help_and_documentation),
+                        leadingIcon = MeshtasticIcons.HelpOutline,
+                    ) {
+                        onNavigate(SettingsRoute.HelpDocs)
+                    }
+                    if (state.isLocal) {
+                        ListItem(text = stringResource(Res.string.device_links), leadingIcon = MeshtasticIcons.Device) {
+                            onNavigate(SettingsRoute.DeviceLinks)
+                        }
                     }
                 }
             }
         }
+
+        ProfileInstallOverlay(state = profileInstallState)
     }
 }
 

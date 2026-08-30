@@ -1469,6 +1469,12 @@ primary_channel_feature
 privacy_url
 
 private_key
+### PROFILE ###
+profile_install_failed
+profile_install_in_progress
+profile_install_preparing
+profile_install_stage_label
+profile_install_succeeded
 profile_transport_handoff_notice
  374fe0e807 (fix(settings): stage profile installation across reconnects)
 project_information
