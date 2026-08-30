@@ -52,7 +52,7 @@ internal fun LocalConfig.installableConfigs(): List<Config> = listOfNotNull(
     power?.let { Config.Builder().also { wb -> wb.power = it }.build() },
     display?.let { Config.Builder().also { wb -> wb.display = it }.build() },
     lora?.let { Config.Builder().also { wb -> wb.lora = it }.build() },
-    // Security is written verbatim as it survived pruning; the security restore branch owns identity overlay.
+    // Security arrives from planning already identity-overlaid and equality-pruned.
     security?.let { Config.Builder().also { wb -> wb.security = it }.build() },
 )
 
