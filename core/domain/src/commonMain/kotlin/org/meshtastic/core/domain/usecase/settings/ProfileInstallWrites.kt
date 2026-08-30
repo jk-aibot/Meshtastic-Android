@@ -45,6 +45,7 @@ internal suspend fun AdminEditScope.installConfig(config: LocalConfig?) {
     config?.installableConfigs()?.forEach { setConfig(it) }
 }
 
+<<<<<<< HEAD
 // Network and Bluetooth are emitted as restart-aware TransportSensitiveStage.ConfigWrite stages.
 internal fun LocalConfig.installableConfigs(): List<Config> = listOfNotNull(
     device?.let { Config.Builder().also { wb -> wb.device = it }.build() },
@@ -55,6 +56,19 @@ internal fun LocalConfig.installableConfigs(): List<Config> = listOfNotNull(
     // Security arrives from planning already identity-overlaid and equality-pruned.
     security?.let { Config.Builder().also { wb -> wb.security = it }.build() },
 )
+||||||| parent of 0deb91c4d6 (fix(settings): stage profile installation across reconnects)
+=======
+// Network and Bluetooth are emitted as restart-aware TransportSensitiveStage.ConfigWrite stages.
+internal fun LocalConfig.installableConfigs(): List<Config> = listOfNotNull(
+    device?.let { Config.Builder().also { wb -> wb.device = it }.build() },
+    position?.let { Config.Builder().also { wb -> wb.position = it }.build() },
+    power?.let { Config.Builder().also { wb -> wb.power = it }.build() },
+    display?.let { Config.Builder().also { wb -> wb.display = it }.build() },
+    lora?.let { Config.Builder().also { wb -> wb.lora = it }.build() },
+    // Security is written verbatim as it survived pruning; the security restore branch owns identity overlay.
+    security?.let { Config.Builder().also { wb -> wb.security = it }.build() },
+)
+>>>>>>> 0deb91c4d6 (fix(settings): stage profile installation across reconnects)
 
 /** Writes the authoritative channel replacement, then the channel set's own LoRa config when one is required. */
 internal suspend fun AdminEditScope.installChannels(
