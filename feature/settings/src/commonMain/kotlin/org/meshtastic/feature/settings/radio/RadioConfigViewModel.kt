@@ -22,8 +22,8 @@ import co.touchlab.kermit.Logger
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -54,8 +54,8 @@ import org.meshtastic.core.domain.usecase.settings.ExportProfileUseCase
 import org.meshtastic.core.domain.usecase.settings.ImportProfileUseCase
 import org.meshtastic.core.domain.usecase.settings.ImportSecurityConfigUseCase
 import org.meshtastic.core.domain.usecase.settings.InstallProfileUseCase
-import org.meshtastic.core.domain.usecase.settings.ProcessRadioResponseUseCase
 import org.meshtastic.core.domain.usecase.settings.ProfileInstallOutcome
+import org.meshtastic.core.domain.usecase.settings.ProcessRadioResponseUseCase
 import org.meshtastic.core.domain.usecase.settings.RadioConfigUseCase
 import org.meshtastic.core.domain.usecase.settings.RadioResponseResult
 import org.meshtastic.core.model.Capabilities
@@ -66,7 +66,10 @@ import org.meshtastic.core.model.MqttProbeStatus
 import org.meshtastic.core.model.MyNodeInfo
 import org.meshtastic.core.model.Node
 import org.meshtastic.core.model.Position
+import org.meshtastic.core.model.excludes
+import org.meshtastic.core.model.util.MalformedMeshtasticUrlException
 import org.meshtastic.core.repository.AnalyticsPrefs
+import org.meshtastic.core.repository.DeviceHardwareRepository
 import org.meshtastic.core.repository.FileService
 import org.meshtastic.core.repository.HomoglyphPrefs
 import org.meshtastic.core.repository.LocationRepository
@@ -78,7 +81,6 @@ import org.meshtastic.core.repository.MeshConnectionManager
 import org.meshtastic.core.repository.MqttManager
 import org.meshtastic.core.repository.NodeRepository
 import org.meshtastic.core.repository.NodeRestartTracker
-import org.meshtastic.core.repository.PacketRepository
 import org.meshtastic.core.repository.PlatformAnalytics
 import org.meshtastic.core.repository.RadioConfigRepository
 import org.meshtastic.core.repository.SecurityKeyBackupStore
@@ -86,12 +88,12 @@ import org.meshtastic.core.repository.ServiceRepository
 import org.meshtastic.core.resources.Res
 import org.meshtastic.core.resources.UiText
 import org.meshtastic.core.resources.cant_shutdown
+import org.meshtastic.core.resources.channel_invalid
 import org.meshtastic.core.resources.key_backup_deleted
 import org.meshtastic.core.resources.key_backup_not_found
 import org.meshtastic.core.resources.key_backup_restore_failed
 import org.meshtastic.core.resources.key_backup_restored
 import org.meshtastic.core.resources.key_backup_saved
-import org.meshtastic.core.resources.profile_transport_handoff_notice
 import org.meshtastic.core.resources.timeout
 import org.meshtastic.core.resources.unknown_error
 import org.meshtastic.core.ui.util.SnackbarManager
@@ -107,6 +109,7 @@ import org.meshtastic.proto.DeviceConnectionStatus
 import org.meshtastic.proto.DeviceMetadata
 import org.meshtastic.proto.DeviceProfile
 import org.meshtastic.proto.DeviceUIConfig
+import org.meshtastic.proto.ExcludedModules
 import org.meshtastic.proto.FileInfo
 import org.meshtastic.proto.HamParameters
 import org.meshtastic.proto.HardwareModel
@@ -123,6 +126,24 @@ import kotlin.time.Duration.Companion.seconds
 
 internal val MANUAL_CHANNEL_WRITE_DELAY: Duration = 1.seconds
 private val REMOTE_READ_LATE_RESPONSE_GRACE: Duration = 2.minutes
+
+/** One stored key backup offered for restore; [longName] is null when the node DB no longer knows [nodeNum]. */
+data class SecurityKeyBackupOption(
+    val nodeNum: Int,
+    val longName: String?,
+    val timestamp: Long,
+    val isCurrentNode: Boolean,
+)
+
+
+/** Observably reports where a staged device-profile install is, without exposing device identifiers. */
+sealed interface ProfileInstallState {
+    data object Idle : ProfileInstallState
+
+    data object Preparing : ProfileInstallState
+
+    data class Installing(val currentStage: Int, val totalStages: Int) : ProfileInstallState
+}
 
 /** Data class that represents the current RadioConfig state. */
 data class RadioConfigState(
@@ -149,25 +170,19 @@ data class RadioConfigState(
     val analyticsAvailable: Boolean = true,
     val analyticsEnabled: Boolean = true,
     val nodeDbResetPreserveFavorites: Boolean = false,
+    val canRebootToDfu: Boolean = false,
+    /** Whether the hardware registry tags the board DIY; null when the registry does not know the board. */
+    val isDiyHardware: Boolean? = null,
 )
-
-/** Observably reports where a staged device-profile install is, without exposing device identifiers. */
-sealed interface ProfileInstallState {
-    data object Idle : ProfileInstallState
-
-    data object Preparing : ProfileInstallState
-
-    data class Installing(val currentStage: Int, val totalStages: Int) : ProfileInstallState
-}
 
 @KoinViewModel
 @Suppress("LongParameterList", "LargeClass")
 open class RadioConfigViewModel(
     @InjectedParam initialDestNum: Int?,
     private val radioConfigRepository: RadioConfigRepository,
-    private val packetRepository: PacketRepository,
     private val serviceRepository: ServiceRepository,
     private val nodeRepository: NodeRepository,
+    private val deviceHardwareRepository: DeviceHardwareRepository,
     private val locationRepository: LocationRepository,
     private val mapConsentPrefs: MapConsentPrefs,
     private val analyticsPrefs: AnalyticsPrefs,
@@ -227,13 +242,13 @@ open class RadioConfigViewModel(
     val analyticsAllowedFlow = analyticsPrefs.analyticsAllowed
 
     fun toggleAnalyticsAllowed() {
-        analyticsPrefs.setAnalyticsAllowed(!analyticsPrefs.analyticsAllowed.value)
+        analyticsPrefs.toggleAnalyticsAllowed()
     }
 
     val homoglyphEncodingEnabledFlow = homoglyphEncodingPrefs.homoglyphEncodingEnabled
 
     fun toggleHomoglyphCharactersEncodingEnabled() {
-        homoglyphEncodingPrefs.setHomoglyphEncodingEnabled(!homoglyphEncodingPrefs.homoglyphEncodingEnabled.value)
+        homoglyphEncodingPrefs.toggleHomoglyphEncodingEnabled()
     }
 
     /** MQTT proxy connection state for the settings UI. */
@@ -271,6 +286,7 @@ open class RadioConfigViewModel(
     private val manualChannelBatchJobs = mutableSetOf<Job>()
     private var manualChannelBatchEnqueueing = false
     private val manualChannelBatchRequestIds = mutableSetOf<Int>()
+    private val dfuRequestIds = mutableSetOf<Int>()
 
     /**
      * Run a one-shot reachability/credentials probe against an MQTT broker. Cancels any in-flight probe before starting
@@ -279,16 +295,16 @@ open class RadioConfigViewModel(
     fun probeMqttConnection(address: String, tlsEnabled: Boolean, username: String?, password: String?) {
         probeJob?.cancel()
         _mqttProbeStatus.value = MqttProbeStatus.Probing
-        probeJob =
-            viewModelScope.launch {
-                val result =
-                    safeCatching { mqttManager.probe(address, tlsEnabled, username, password) }
-                        .getOrElse { e ->
-                            Logger.w(e) { "MQTT probe threw" }
-                            MqttProbeStatus.Other(message = e.message)
-                        }
-                _mqttProbeStatus.value = result
+        probeJob = viewModelScope.launch {
+            val result = safeCatching {
+                mqttManager.probe(address, tlsEnabled, username, password)
             }
+                .getOrElse { e ->
+                    Logger.w(e) { "MQTT probe threw" }
+                    MqttProbeStatus.Other(message = e.message)
+                }
+            _mqttProbeStatus.value = result
+        }
     }
 
     /** Clear the latest probe result (e.g. when the user edits the address). */
@@ -339,6 +355,26 @@ open class RadioConfigViewModel(
                 _destNode.value = it
                 _radioConfigState.update { state ->
                     state.copy(metadata = it?.metadata, localIsLicensed = it?.user?.is_licensed == true)
+                }
+            }
+            .launchIn(viewModelScope)
+
+        _destNode
+            .map { it?.user?.hw_model?.value }
+            .distinctUntilChanged()
+            .flatMapLatest { hwModel ->
+                if (hwModel == null) {
+                    flowOf(null)
+                } else {
+                    deviceHardwareRepository.observeDeviceHardware(hwModel)
+                }
+            }
+            .onEach { hardware ->
+                _radioConfigState.update {
+                    it.copy(
+                        canRebootToDfu = hardware?.isNrf52Arc == true,
+                        isDiyHardware = hardware?.isDiy,
+                    )
                 }
             }
             .launchIn(viewModelScope)
@@ -480,7 +516,13 @@ open class RadioConfigViewModel(
             expectRestartIfLocal(RebootBehavior.ALWAYS)
             radioConfigUseCase.setHamMode(
                 destNum,
-                HamParameters(call_sign = callSign, short_name = user.short_name, long_name = longName),
+                HamParameters.Builder()
+                    .also { wb ->
+                        wb.call_sign = callSign
+                        wb.short_name = user.short_name
+                        wb.long_name = longName
+                    }
+                    .build(),
                 onRequestId = ::registerWriteRequestId,
             )
         }
@@ -532,22 +574,23 @@ open class RadioConfigViewModel(
                             onInterrupted = { result ->
                                 reconcileInterruptedManualChannelUpdate(
                                     destNum = destNum,
-                                    oldSettings = current,
                                     appliedSettings = result.appliedSettings,
                                 )
                             },
                         )
                         currentCoroutineContext().ensureActive()
-                        commitManualChannelSettings(destNum = destNum, oldSettings = current, newSettings = new)
+                        commitManualChannelSettings(destNum = destNum, newSettings = new)
                         finishManualChannelBatch()
                     } catch (e: CancellationException) {
                         abortManualChannelBatch(batchRequestIds)
                         throw e
-                    } catch (e: Throwable) {
+                    } catch (e: Exception) {
                         abortManualChannelBatch(batchRequestIds)
-                        if (e !is Exception) throw e
                         Logger.w(e) { "Manual channel update failed after enqueue" }
                         e.message?.let(::sendError) ?: sendError(Res.string.unknown_error)
+                    } catch (e: Throwable) {
+                        abortManualChannelBatch(batchRequestIds)
+                        throw e
                     }
                 }
             } finally {
@@ -559,29 +602,21 @@ open class RadioConfigViewModel(
     private fun getManualChannelUpdatePlan(new: List<ChannelSettings>, old: List<ChannelSettings>): List<Channel> =
         getChannelList(new, old).sortedBy { it.index }
 
-    private suspend fun commitManualChannelSettings(
-        destNum: Int,
-        oldSettings: List<ChannelSettings>,
-        newSettings: List<ChannelSettings>,
-    ) {
+    private suspend fun commitManualChannelSettings(destNum: Int, newSettings: List<ChannelSettings>) {
         withContext(NonCancellable) {
+            // replaceAllSettings re-keys the conversations itself; remote-admin of another node's channels must not
+            // touch this device's conversations, which is what the destNum gate protects.
             if (destNum == myNodeNum) {
-                packetRepository.migrateChannelsByPSK(oldSettings, newSettings)
                 radioConfigRepository.replaceAllSettings(newSettings)
             }
             _radioConfigState.update { it.copy(channelList = newSettings) }
         }
     }
 
-    private suspend fun reconcileInterruptedManualChannelUpdate(
-        destNum: Int,
-        oldSettings: List<ChannelSettings>,
-        appliedSettings: List<ChannelSettings>,
-    ) {
+    private suspend fun reconcileInterruptedManualChannelUpdate(destNum: Int, appliedSettings: List<ChannelSettings>) {
         withContext(NonCancellable) {
             Logger.w { "Reconciling interrupted manual channel update appliedSettings=${appliedSettings.size}" }
             if (destNum == myNodeNum) {
-                packetRepository.migrateChannelsByPSK(oldSettings, appliedSettings)
                 radioConfigRepository.replaceAllSettings(appliedSettings)
             }
             _radioConfigState.update { it.copy(channelList = appliedSettings) }
@@ -594,17 +629,23 @@ open class RadioConfigViewModel(
             _radioConfigState.update { state ->
                 state.copy(
                     radioConfig =
-                    state.radioConfig.newBuilder().also { wb ->
-                        device = config.device ?: state.radioConfig.device,
-                        position = config.position ?: state.radioConfig.position,
-                        power = config.power ?: state.radioConfig.power,
-                        network = config.network ?: state.radioConfig.network,
-                        display = config.display ?: state.radioConfig.display,
-                        // LoRa is intentionally NOT applied optimistically: the firmware can clamp or region-swap
-                        // (e.g. EU sibling) a LoRa write and applies it live, so the form must reflect the device's
-                        // actual value. It is re-read from the device when the LoRa screen is next opened.
-                        bluetooth = config.bluetooth ?: state.radioConfig.bluetooth,
-                        security = config.security ?: state.radioConfig.security, }.build(),
+                    state.radioConfig
+                        .newBuilder()
+                        .also { wb ->
+                            wb.device = config.device ?: state.radioConfig.device
+                            wb.position = config.position ?: state.radioConfig.position
+                            wb.power = config.power ?: state.radioConfig.power
+                            wb.network = config.network ?: state.radioConfig.network
+                            wb.display = config.display ?: state.radioConfig.display
+                            // LoRa is intentionally NOT applied optimistically: the firmware can clamp or
+                            // region-swap
+                            // (e.g. EU sibling) a LoRa write and applies it live, so the form must reflect the
+                            // device's
+                            // actual value. It is re-read from the device when the LoRa screen is next opened.
+                            wb.bluetooth = config.bluetooth ?: state.radioConfig.bluetooth
+                            wb.security = config.security ?: state.radioConfig.security
+                        }
+                        .build(),
                 )
             }
             expectRestartIfLocal(config.saveRebootBehavior())
@@ -612,32 +653,10 @@ open class RadioConfigViewModel(
         }
     }
 
-    @Suppress("CyclomaticComplexMethod")
     fun setModuleConfig(config: ModuleConfig) {
         val destNum = destNum ?: destNode.value?.num ?: return
         safeLaunch(tag = "setModuleConfig") {
-            _radioConfigState.update { state ->
-                state.copy(
-                    moduleConfig =
-                    state.moduleConfig.newBuilder().also { wb ->
-                        mqtt = config.mqtt ?: state.moduleConfig.mqtt,
-                        serial = config.serial ?: state.moduleConfig.serial,
-                        external_notification =
-                        config.external_notification ?: state.moduleConfig.external_notification,
-                        store_forward = config.store_forward ?: state.moduleConfig.store_forward,
-                        range_test = config.range_test ?: state.moduleConfig.range_test,
-                        telemetry = config.telemetry ?: state.moduleConfig.telemetry,
-                        canned_message = config.canned_message ?: state.moduleConfig.canned_message,
-                        audio = config.audio ?: state.moduleConfig.audio,
-                        remote_hardware = config.remote_hardware ?: state.moduleConfig.remote_hardware,
-                        neighbor_info = config.neighbor_info ?: state.moduleConfig.neighbor_info,
-                        ambient_lighting = config.ambient_lighting ?: state.moduleConfig.ambient_lighting,
-                        detection_sensor = config.detection_sensor ?: state.moduleConfig.detection_sensor,
-                        paxcounter = config.paxcounter ?: state.moduleConfig.paxcounter,
-                        statusmessage = config.statusmessage ?: state.moduleConfig.statusmessage,
-                        tak = config.tak ?: state.moduleConfig.tak, }.build(),
-                )
-            }
+            _radioConfigState.update { state -> state.copy(moduleConfig = state.moduleConfig.mergedWith(config)) }
             expectRestartIfLocal(config.saveRebootBehavior())
             radioConfigUseCase.setModuleConfig(destNum, config, onRequestId = ::registerWriteRequestId)
         }
@@ -679,6 +698,16 @@ open class RadioConfigViewModel(
                 safeLaunch(tag = "reboot") {
                     expectRestartIfLocal(RebootBehavior.ALWAYS)
                     adminActionsUseCase.reboot(destNum, onRequestId = ::registerRequestId)
+                    trackAdminAction()
+                }
+
+            AdminRoute.REBOOT_DFU.name ->
+                safeLaunch(tag = "rebootToDfu") {
+                    if (isLocal) nodeRestartTracker.expectRestart()
+                    adminActionsUseCase.rebootToDfu(destNum) { packetId ->
+                        registerRequestId(packetId)
+                        dfuRequestIds.add(packetId)
+                    }
                     trackAdminAction()
                 }
 
@@ -742,12 +771,6 @@ open class RadioConfigViewModel(
         }
     }
 
-    /** Whether an encrypted key backup exists for the node currently being configured. */
-    fun securityKeyBackupExists(): Boolean {
-        val nodeNum = destNum ?: destNode.value?.num ?: return false
-        return securityKeyBackupStore.get(nodeNum) != null
-    }
-
     /** Saves the node's current public/private keys to OS-backed encrypted storage, keyed by node number. */
     fun backupSecurityKeys(securityConfig: Config.SecurityConfig, onComplete: () -> Unit = {}) {
         val nodeNum = destNum ?: destNode.value?.num ?: return
@@ -763,17 +786,40 @@ open class RadioConfigViewModel(
                 publicKeyBase64 = securityConfig.public_key.base64(),
                 privateKeyBase64 = securityConfig.private_key.base64(),
                 timestamp = nowMillis,
+                longName = nodeRepository.nodeDBbyNum.value[nodeNum]?.user?.long_name?.takeIf { it.isNotBlank() },
             )
             snackbarManager.showSnackbar(message = UiText.Resource(Res.string.key_backup_saved).resolve())
             onComplete()
         }
     }
 
-    /** Restores the previously backed-up keys for this node and pushes them to the device via admin config. */
-    fun restoreSecurityKeys() {
+    /** Every stored key backup, this node's own first, then newest first. */
+    fun securityKeyBackups(): List<SecurityKeyBackupOption> {
+        val nodeNum = destNum ?: destNode.value?.num
+        val nodes = nodeRepository.nodeDBbyNum.value
+        return securityKeyBackupStore
+            .all()
+            .map { (num, keys) ->
+                SecurityKeyBackupOption(
+                    nodeNum = num,
+                    longName = keys.longName ?: nodes[num]?.user?.long_name?.takeIf { it.isNotBlank() },
+                    timestamp = keys.timestamp,
+                    isCurrentNode = num == nodeNum,
+                )
+            }
+            .sortedWith(
+                compareByDescending<SecurityKeyBackupOption> { it.isCurrentNode }.thenByDescending { it.timestamp },
+            )
+    }
+
+    /**
+     * Restores the keys backed up under [fromNodeNum] (default: this node) and pushes them to the device via admin
+     * config.
+     */
+    fun restoreSecurityKeys(fromNodeNum: Int? = null) {
         val nodeNum = destNum ?: destNode.value?.num ?: return
         safeLaunch(tag = "restoreSecurityKeys") {
-            val stored = securityKeyBackupStore.get(nodeNum)
+            val stored = securityKeyBackupStore.get(fromNodeNum ?: nodeNum)
             if (stored == null) {
                 snackbarManager.showSnackbar(message = UiText.Resource(Res.string.key_backup_not_found).resolve())
                 return@safeLaunch
@@ -791,9 +837,9 @@ open class RadioConfigViewModel(
         }
     }
 
-    /** Deletes the encrypted key backup for this node, if any. */
-    fun deleteSecurityKeyBackup(onComplete: () -> Unit = {}) {
-        val nodeNum = destNum ?: destNode.value?.num ?: return
+    /** Deletes the encrypted key backup stored under [backupNodeNum] (default: this node), if any. */
+    fun deleteSecurityKeyBackup(backupNodeNum: Int? = null, onComplete: () -> Unit = {}) {
+        val nodeNum = backupNodeNum ?: destNum ?: destNode.value?.num ?: return
         safeLaunch(tag = "deleteSecurityKeyBackup") {
             securityKeyBackupStore.delete(nodeNum)
             snackbarManager.showSnackbar(message = UiText.Resource(Res.string.key_backup_deleted).resolve())
@@ -801,7 +847,7 @@ open class RadioConfigViewModel(
         }
     }
 
-    fun installProfile(protobuf: DeviceProfile, onResult: (Result<Unit>) -> Unit = {}) {
+    fun installProfile(protobuf: DeviceProfile, onResult: (Result<ProfileInstallOutcome>) -> Unit = {}) {
         val destNum = destNum ?: destNode.value?.num
         val currentUser = destNode.value?.user
         val isLocal = radioConfigState.value.isLocal
@@ -818,30 +864,23 @@ open class RadioConfigViewModel(
             viewModelScope.launch(start = CoroutineStart.LAZY) {
                 try {
                     val result = safeCatching {
-                        val outcome =
-                            installProfileUseCase(
-                                destNum = destNum,
-                                profile = protobuf,
-                                currentUser = currentUser,
-                                isLocal = isLocal,
-                            ) { progress ->
-                                _profileInstallState.value =
-                                    ProfileInstallState.Installing(progress.currentStage, progress.totalStages)
-                            }
-                        // The final stage intentionally ended the connection (Wi-Fi enabled over BLE, for
-                        // example); tell the user to reach the radio through its new transport instead of
-                        // leaving an unbounded reconnect loop running.
-                        if (outcome is ProfileInstallOutcome.TransportHandedOff) {
-                            snackbarManager.showSnackbar(
-                                message = UiText.Resource(Res.string.profile_transport_handoff_notice).resolve(),
-                            )
+                        installProfileUseCase(
+                            destNum = destNum,
+                            profile = protobuf,
+                            currentUser = currentUser,
+                            isLocal = isLocal,
+                        ) { progress ->
+                            _profileInstallState.value =
+                                ProfileInstallState.Installing(progress.currentStage, progress.totalStages)
                         }
-                        Unit
                     }
                     // Keep device/profile identifiers and exception messages out of logs while retaining the
                     // failure type.
                     result.onFailure { error ->
                         Logger.w { "[installProfile] Failed to install profile; cause=${error.safeLogType()}" }
+                        if (error is MalformedMeshtasticUrlException) {
+                            snackbarManager.showSnackbar(message = UiText.Resource(Res.string.channel_invalid).resolve())
+                        }
                     }
                     onResult(result)
                 } finally {
@@ -890,13 +929,6 @@ open class RadioConfigViewModel(
     private fun setResponseStateLoading(route: Enum<*>, showOverlay: Boolean) {
         val destNum = destNum ?: destNode.value?.num ?: return
 
-        // A module without a per-module get (no ModuleConfigType, e.g. MeshBeacon) reads from the connect-time config
-        // sync — just select the route and render, skipping the loading/request round-trip that would never complete.
-        if (route is ModuleRoute && !route.refreshable) {
-            _radioConfigState.update { it.copy(route = route.name, responseState = ResponseState.Empty) }
-            return
-        }
-
         _radioConfigState.update {
             it.copy(route = route.name, responseState = ResponseState.Loading(showOverlay = showOverlay))
         }
@@ -907,10 +939,12 @@ open class RadioConfigViewModel(
                 safeLaunch(tag = "getOwner") {
                     radioConfigUseCase.getOwner(destNum, onRequestId = ::registerReadRequestId)
                 }
-                // The status message is edited on the user screen, so it is read with the owner. Gated on the
-                // capability: firmware without the module never answers the get, leaving the overlay waiting.
+                // The status message is edited on the user screen, so it is read with the owner. Gated like the
+                // editor: firmware without the module never answers the get, leaving the overlay waiting.
+                val metadata = radioConfigState.value.metadata
                 val readsStatusMessage =
-                    Capabilities(radioConfigState.value.metadata?.firmware_version).supportsStatusMessage
+                    Capabilities(metadata?.firmware_version).supportsStatusMessage &&
+                        !metadata.excludes(ExcludedModules.STATUSMESSAGE_CONFIG)
                 loadFanOut = ConfigRoute.USER.name to readsStatusMessage
                 if (readsStatusMessage) {
                     safeLaunch(tag = "getStatusMessageConfig") {
@@ -981,6 +1015,21 @@ open class RadioConfigViewModel(
             safeLaunch(tag = "getRingtone") {
                 radioConfigUseCase.getRingtone(destNum, onRequestId = ::registerReadRequestId)
             }
+        }
+        if (route == ModuleRoute.MESH_BEACON) {
+            // The beacon editor gates on the radio's LoRa region and offers its channels, neither of which a remote
+            // session has until read. Firmware without the module never answers the module get, so skip it there.
+            safeLaunch(tag = "getChannel0ForMeshBeacon") {
+                radioConfigUseCase.getChannel(destNum, 0, onRequestId = ::registerReadRequestId)
+            }
+            safeLaunch(tag = "getLoraConfigForMeshBeacon") {
+                radioConfigUseCase.getConfig(
+                    destNum,
+                    AdminMessage.ConfigType.LORA_CONFIG.value,
+                    onRequestId = ::registerReadRequestId,
+                )
+            }
+            if (!Capabilities(radioConfigState.value.metadata?.firmware_version).supportsMeshBeacon) return
         }
         safeLaunch(tag = "getModuleConfig") {
             radioConfigUseCase.getModuleConfig(destNum, route.type, onRequestId = ::registerReadRequestId)
@@ -1125,6 +1174,7 @@ open class RadioConfigViewModel(
                 if (requestIds.value.contains(packetId)) {
                     // Capture batch membership before removeRequestId drops the last id and empties the batch set.
                     val timedOutBatchRequest = packetId in manualChannelBatchRequestIds
+                    val timedOutDfuRequest = packetId in dfuRequestIds
                     val requestRoute = readRequestRoutes[packetId].orEmpty()
                     val deferredRemoteReadError = deferredRemoteReadErrors[packetId]
                     removeRequestId(packetId)
@@ -1135,12 +1185,12 @@ open class RadioConfigViewModel(
                         // A save that reboots the node races the reboot against its ACK; a timeout here during an
                         // expected restart means the reboot won — treat it as the restarting-success, not an error.
                         // A manual channel batch never reboots, so exclude it even inside a stale restart window.
-                        if (
+                        // nRF52 firmware jumps to its bootloader without acking, so a DFU request only fails loudly.
+                        val restartWon =
                             nodeRestartTracker.restartExpected.value &&
-                            !timedOutBatchRequest &&
-                            !manualChannelBatchInFlight() &&
-                            radioConfigState.value.route.isEmpty()
-                        ) {
+                                !timedOutBatchRequest &&
+                                !manualChannelBatchInFlight()
+                        if ((restartWon || timedOutDfuRequest) && radioConfigState.value.route.isEmpty()) {
                             setResponseStateSuccess()
                         } else {
                             deferredRemoteReadError?.let(::sendError) ?: sendError(Res.string.timeout)
@@ -1197,6 +1247,7 @@ open class RadioConfigViewModel(
         readRequestRoutes.remove(packetId)
         deferredRemoteReadErrors.remove(packetId)
         manualChannelBatchRequestIds.remove(packetId)
+        dfuRequestIds.remove(packetId)
         requestIds.update { it.withoutPacketId(packetId) }
     }
 
@@ -1208,6 +1259,7 @@ open class RadioConfigViewModel(
             removeLateRemoteRead(it)
         }
         manualChannelBatchRequestIds.removeAll(packetIds)
+        dfuRequestIds.removeAll(packetIds)
         requestIds.update { ids -> ids.withoutPacketIds(packetIds) }
     }
 
@@ -1331,9 +1383,9 @@ open class RadioConfigViewModel(
                             channelList =
                             state.channelList.toMutableList().apply {
                                 val index = response.index
-                                val settings = response.settings ?: ChannelSettings()
+                                val settings = response.settings ?: ChannelSettings.Builder().build()
                                 // Make sure list is large enough
-                                while (size <= index) add(ChannelSettings())
+                                while (size <= index) add(ChannelSettings.Builder().build())
                                 set(index, settings)
                             },
                         )
@@ -1362,43 +1414,27 @@ open class RadioConfigViewModel(
                 _radioConfigState.update { state ->
                     state.copy(
                         radioConfig =
-                        state.radioConfig.newBuilder().also { wb ->
-                            device = response.device ?: state.radioConfig.device,
-                            position = response.position ?: state.radioConfig.position,
-                            power = response.power ?: state.radioConfig.power,
-                            network = response.network ?: state.radioConfig.network,
-                            display = response.display ?: state.radioConfig.display,
-                            lora = response.lora ?: state.radioConfig.lora,
-                            bluetooth = response.bluetooth ?: state.radioConfig.bluetooth,
-                            security = response.security ?: state.radioConfig.security, }.build(),
+                        state.radioConfig
+                            .newBuilder()
+                            .also { wb ->
+                                wb.device = response.device ?: state.radioConfig.device
+                                wb.position = response.position ?: state.radioConfig.position
+                                wb.power = response.power ?: state.radioConfig.power
+                                wb.network = response.network ?: state.radioConfig.network
+                                wb.display = response.display ?: state.radioConfig.display
+                                wb.lora = response.lora ?: state.radioConfig.lora
+                                wb.bluetooth = response.bluetooth ?: state.radioConfig.bluetooth
+                                wb.security = response.security ?: state.radioConfig.security
+                            }
+                            .build(),
                     )
                 }
                 if (!isLateRemoteRead) incrementCompleted()
             }
 
             is RadioResponseResult.ModuleConfigResponse -> {
-                val response = result.config
                 _radioConfigState.update { state ->
-                    state.copy(
-                        moduleConfig =
-                        state.moduleConfig.newBuilder().also { wb ->
-                            mqtt = response.mqtt ?: state.moduleConfig.mqtt,
-                            serial = response.serial ?: state.moduleConfig.serial,
-                            external_notification =
-                            response.external_notification ?: state.moduleConfig.external_notification,
-                            store_forward = response.store_forward ?: state.moduleConfig.store_forward,
-                            range_test = response.range_test ?: state.moduleConfig.range_test,
-                            telemetry = response.telemetry ?: state.moduleConfig.telemetry,
-                            canned_message = response.canned_message ?: state.moduleConfig.canned_message,
-                            audio = response.audio ?: state.moduleConfig.audio,
-                            remote_hardware = response.remote_hardware ?: state.moduleConfig.remote_hardware,
-                            neighbor_info = response.neighbor_info ?: state.moduleConfig.neighbor_info,
-                            ambient_lighting = response.ambient_lighting ?: state.moduleConfig.ambient_lighting,
-                            detection_sensor = response.detection_sensor ?: state.moduleConfig.detection_sensor,
-                            paxcounter = response.paxcounter ?: state.moduleConfig.paxcounter,
-                            statusmessage = response.statusmessage ?: state.moduleConfig.statusmessage,
-                            tak = response.tak ?: state.moduleConfig.tak, }.build(),
-                    )
+                    state.copy(moduleConfig = state.moduleConfig.mergedWith(result.config))
                 }
                 if (!isLateRemoteRead) incrementCompleted()
             }
@@ -1538,13 +1574,13 @@ internal suspend fun applyManualChannelUpdatePlan(
 
 private fun MutableList<ChannelSettings>.applyManualChannelWrite(channel: Channel) {
     while (size <= channel.index) {
-        add(ChannelSettings())
+        add(ChannelSettings.Builder().build())
     }
     this[channel.index] =
         if (channel.role == Channel.Role.DISABLED) {
-            ChannelSettings()
+            ChannelSettings.Builder().build()
         } else {
-            channel.settings ?: ChannelSettings()
+            channel.settings ?: ChannelSettings.Builder().build()
         }
 }
 
@@ -1564,7 +1600,10 @@ internal fun Config.saveRebootBehavior(): RebootBehavior = when {
     else -> RebootBehavior.MAY_RESTART
 }
 
+/**
+ * Firmware `AdminModule::handleSetModuleConfig` reboots for every module section except status message and Mesh Beacon.
+ */
 internal fun ModuleConfig.saveRebootBehavior(): RebootBehavior =
-    if (statusmessage != null) RebootBehavior.NEVER else RebootBehavior.ALWAYS
+    if (statusmessage != null || mesh_beacon != null) RebootBehavior.NEVER else RebootBehavior.ALWAYS
 
 private fun Throwable.safeLogType(): String = this::class.simpleName ?: "Throwable"
