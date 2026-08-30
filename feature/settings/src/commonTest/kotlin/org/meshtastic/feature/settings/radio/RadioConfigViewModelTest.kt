@@ -1218,7 +1218,7 @@ class RadioConfigViewModelTest {
         everySuspend { installProfileUseCase(any(), any(), any(), any(), any()) } returns
             ProfileInstallOutcome.Completed
 
-        var result: Result<Unit>? = null
+        var result: Result<ProfileInstallOutcome>? = null
         viewModel.installProfile(profile) { result = it }
         advanceUntilIdle()
 
