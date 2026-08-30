@@ -1467,6 +1467,10 @@ preview_text
 primary
 primary_channel_feature
 privacy_url
+
+private_key
+profile_transport_handoff_notice
+ 374fe0e807 (fix(settings): stage profile installation across reconnects)
 project_information
 provide_location_to_mesh
 provider_name_exists
