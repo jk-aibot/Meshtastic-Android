@@ -336,7 +336,7 @@ class InstallProfileUseCaseTest {
         wb.display = DisplayConfig(compass_north_top = true)
         wb.lora = LoRaConfig(region = LoRaConfig.RegionCode.US)
         wb.bluetooth = BluetoothConfig(enabled = true)
-        wb.security = SecurityConfig()
+        wb.security = SecurityConfig.Builder().build()
         wb.version = 7
     }.build()
         val currentModuleConfig =
@@ -645,7 +645,7 @@ class InstallProfileUseCaseTest {
     @Test
     fun `transport stages retarget the current local identity after each reconnect`() = runTest(testDispatcher) {
         radioConfigRepository.setLocalConfigDirect(
-            LocalConfig.Builder().also { wb -> wb.security = SecurityConfig(private_key = ByteArray(32) { 7 }.toByteString()) }.build(),
+            LocalConfig.Builder().also { wb -> wb.security = SecurityConfig.Builder().also { wb -> wb.private_key = ByteArray(32) { 7 }.toByteString() }.build() }.build(),
         )
         radioController.onEditSettingsCommitted = {
             nodeRepository.setMyNodeInfo(TestDataFactory.createMyNodeInfo(myNodeNum = 5678))
@@ -661,7 +661,7 @@ class InstallProfileUseCaseTest {
         val profile =
             DeviceProfile.Builder().also { wb ->
         wb.config = LocalConfig.Builder().also { wb ->
-        wb.security = SecurityConfig(is_managed = true)
+        wb.security = SecurityConfig.Builder().also { wb -> wb.is_managed = true }.build()
         wb.bluetooth = BluetoothConfig(enabled = true)
     }.build()
         wb.module_config = LocalModuleConfig.Builder().also { wb ->
@@ -677,6 +677,125 @@ class InstallProfileUseCaseTest {
         assertEquals(3456, radioController.configWrites.last().destination)
         assertFalse(restartTracker.restartExpected.value)
     }
+
+    @Test
+    fun `security restore overlays the running private key when the imported key is invalid`() =
+        runTest(testDispatcher) {
+            radioConfigRepository.setLocalConfigDirect(
+                LocalConfig.Builder().also { wb -> wb.security = SecurityConfig.Builder().also { wb ->
+        wb.private_key = securityKey(32, 7)
+        wb.public_key = securityKey(32, 9)
+    }.build() }.build(),
+            )
+            radioController.onEditSettingsCommitted = { commitAndRestart() }
+            val importedAdminKeys = listOf(securityKey(32, 1), securityKey(32, 2))
+            val requested =
+                SecurityConfig.Builder().also { wb ->
+        wb.private_key = securityKey(16, 5)
+        wb.is_managed = true
+        wb.admin_channel_enabled = true
+        wb.admin_key = importedAdminKeys
+    }.build()
+            val profile = DeviceProfile.Builder().also { wb -> wb.config = LocalConfig.Builder().also { wb -> wb.security = requested }.build() }.build()
+
+            useCase(1234, profile, User.Builder().build(), isLocal = true)
+
+            val written = radioController.configWrites.single { it.config.security != null }.config.security!!
+            assertEquals(securityKey(32, 7), written.private_key)
+            assertEquals(securityKey(32, 9), written.public_key)
+            assertEquals(true, written.is_managed)
+            assertEquals(true, written.admin_channel_enabled)
+            assertEquals(importedAdminKeys, written.admin_key)
+            assertEquals(securityKey(16, 5), profile.config?.security?.private_key)
+        }
+
+    @Test
+    fun `security restore sends an imported valid private key and clears the public key`() = runTest(testDispatcher) {
+        radioConfigRepository.setLocalConfigDirect(
+            LocalConfig.Builder().also { wb -> wb.security = SecurityConfig.Builder().also { wb ->
+        wb.private_key = securityKey(32, 7)
+        wb.public_key = securityKey(32, 9)
+    }.build() }.build(),
+        )
+        radioController.onEditSettingsCommitted = { commitAndRestart() }
+        val profile =
+            DeviceProfile.Builder().also { wb -> wb.config = LocalConfig.Builder().also { wb -> wb.security = SecurityConfig.Builder().also { wb ->
+        wb.private_key = securityKey(32, 2)
+        wb.public_key = securityKey(32, 8)
+        wb.is_managed = true
+        wb.packet_signature_policy = SecurityConfig.PacketSignaturePolicy.PACKET_SIGNATURE_POLICY_BALANCED
+    }.build() }.build() }.build()
+
+        useCase(1234, profile, User.Builder().build(), isLocal = true)
+
+        val written = radioController.configWrites.single { it.config.security != null }.config.security!!
+        assertEquals(securityKey(32, 2), written.private_key)
+        assertEquals(securityKey(0, 0), written.public_key)
+        assertEquals(true, written.is_managed)
+        assertEquals(
+            SecurityConfig.PacketSignaturePolicy.PACKET_SIGNATURE_POLICY_BALANCED,
+            written.packet_signature_policy,
+        )
+    }
+
+    @Test
+    fun `security restore is skipped when the overlaid section matches the running config`() = runTest(testDispatcher) {
+        radioConfigRepository.setLocalConfigDirect(
+            LocalConfig.Builder().also { wb -> wb.security = SecurityConfig.Builder().also { wb ->
+        wb.private_key = securityKey(32, 7)
+        wb.is_managed = true
+    }.build() }.build(),
+        )
+        val profile =
+            DeviceProfile.Builder().also { wb -> wb.config = LocalConfig.Builder().also { wb -> wb.security = SecurityConfig.Builder().also { wb ->
+        wb.private_key = securityKey(16, 5)
+        wb.is_managed = true
+    }.build() }.build() }.build()
+
+        useCase(1234, profile, User.Builder().build(), isLocal = true)
+
+        assertNoDeviceWrites()
+        assertFalse(restartTracker.restartExpected.value)
+    }
+
+    @Test
+    fun `security restore is not written when the profile has no security section`() = runTest(testDispatcher) {
+        radioConfigRepository.setLocalConfigDirect(
+            LocalConfig.Builder().also { wb -> wb.security = SecurityConfig.Builder().also { wb -> wb.private_key = securityKey(32, 7) }.build() }.build(),
+        )
+        radioController.onEditSettingsCommitted = { commitAndRestart() }
+        val profile = DeviceProfile.Builder().also { wb -> wb.config = LocalConfig.Builder().also { wb -> wb.lora = LoRaConfig(region = LoRaConfig.RegionCode.US) }.build() }.build()
+
+        useCase(1234, profile, User.Builder().build(), isLocal = true)
+
+        assertTrue(radioController.configWrites.none { it.config.security != null })
+    }
+
+    @Test
+    fun `security restore sends requested security unchanged when neither side has a valid private key`() =
+        runTest(testDispatcher) {
+            radioConfigRepository.setLocalConfigDirect(
+                LocalConfig.Builder().also { wb -> wb.security = SecurityConfig.Builder().also { wb ->
+        wb.private_key = securityKey(16, 6)
+        wb.public_key = securityKey(31, 7)
+    }.build() }.build(),
+            )
+            radioController.onEditSettingsCommitted = { commitAndRestart() }
+            val requested =
+                SecurityConfig.Builder().also { wb ->
+        wb.private_key = securityKey(31, 1)
+        wb.public_key = securityKey(16, 2)
+        wb.is_managed = true
+        wb.serial_enabled = false
+        wb.admin_channel_enabled = false
+        wb.packet_signature_policy = SecurityConfig.PacketSignaturePolicy.PACKET_SIGNATURE_POLICY_STRICT
+    }.build()
+            val profile = DeviceProfile.Builder().also { wb -> wb.config = LocalConfig.Builder().also { wb -> wb.security = requested }.build() }.build()
+
+            useCase(1234, profile, User.Builder().build(), isLocal = true)
+
+            assertEquals(requested, radioController.configWrites.single { it.config.security != null }.config.security)
+        }
 
     @Test
     fun `profile install rejects a stale local destination before writes`() = runTest(testDispatcher) {
@@ -964,7 +1083,7 @@ class InstallProfileUseCaseTest {
         wb.display = DisplayConfig()
         wb.lora = LoRaConfig(region = LoRaConfig.RegionCode.US)
         wb.bluetooth = BluetoothConfig(enabled = true)
-        wb.security = SecurityConfig()
+        wb.security = SecurityConfig.Builder().build()
     }.build()
         wb.module_config = LocalModuleConfig.Builder().also { wb ->
         wb.mqtt = MQTTConfig(enabled = true)
@@ -1096,4 +1215,7 @@ class InstallProfileUseCaseTest {
         radioController.setConnectionState(ConnectionState.Disconnected)
         yield()
     }
+
+    /** Deterministic single-byte fills keep raw key material out of test sources. */
+    private fun securityKey(size: Int, fill: Byte) = ByteArray(size) { fill }.toByteString()
 }
