@@ -166,7 +166,7 @@ fun ConnectionsScreen(
     val firmwareUpdateNotice by connectionsViewModel.firmwareUpdateNotice.collectAsStateWithLifecycle()
     val regionUnset by connectionsViewModel.regionUnset.collectAsStateWithLifecycle()
     val txDisabled by connectionsViewModel.txDisabled.collectAsStateWithLifecycle()
-    val sessionAuthorized by connectionsViewModel.sessionAuthorized.collectAsStateWithLifecycle()
+    val lockdownState by connectionsViewModel.lockdownState.collectAsStateWithLifecycle()
 
     val selectedDevice by scanModel.selectedNotNullFlow.collectAsStateWithLifecycle()
     val persistedDeviceName by scanModel.persistedDeviceName.collectAsStateWithLifecycle()
@@ -504,8 +504,12 @@ fun ConnectionsScreen(
                         val isPhysicalDevice =
                             selectedDevice != InterfaceId.MOCK.id.toString() &&
                                 selectedDevice != InterfaceId.REPLAY.id.toString()
+                        // Gate on lockdown state rather than the raw session flag: ordinary firmware never sends a
+                        // LockdownStatus, so sessionAuthorized never flips true and the notices would never show.
                         val canShowConfigWarnings =
-                            uiState == ConnectionUiState.CONNECTED_WITH_NODE && sessionAuthorized && isPhysicalDevice
+                            uiState == ConnectionUiState.CONNECTED_WITH_NODE &&
+                                lockdownState.allowsConfigWrites &&
+                                isPhysicalDevice
                         if (canShowConfigWarnings && regionUnset) {
                             Spacer(modifier = Modifier.height(8.dp))
                             Card(modifier = Modifier.fillMaxWidth()) {
