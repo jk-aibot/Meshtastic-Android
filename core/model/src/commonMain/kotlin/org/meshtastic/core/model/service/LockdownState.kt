@@ -16,7 +16,13 @@
  */
 package org.meshtastic.core.model.service
 
-/** Represents the lockdown authentication state for a firmware-locked device. */
+/**
+ * Lockdown session state for the connected device.
+ *
+ * Most firmware builds have no lockdown support and never send a [LockdownStatus], so the app-level state stays at
+ * [None] for the whole connection. [allowsConfigWrites] is the UI-facing summary: whether the client may expect admin
+ * config writes (and therefore config-health notices like the region warning) to reach the device right now.
+ */
 sealed class LockdownState {
     data object None : LockdownState()
 
@@ -47,6 +53,27 @@ sealed class LockdownState {
             require(backoffSeconds > 0) { "backoffSeconds must be positive" }
         }
     }
+
+    /**
+     * True when config writes may proceed: the device either has no lockdown support ([None], the common case), has
+     * lockdown turned off ([Disabled]), or is unlocked ([Unlocked]). False while the device is withholding admin access
+     * — locked, unprovisioned, or mid-auth-failure — because notices about device config would be premature.
+     */
+    val allowsConfigWrites: Boolean
+        get() =
+            when (this) {
+                is None,
+                is Disabled,
+                is Unlocked,
+                -> true
+
+                is Locked,
+                is NeedsProvision,
+                is LockNowAcknowledged,
+                is UnlockFailed,
+                is UnlockBackoff,
+                -> false
+            }
 }
 
 /**
