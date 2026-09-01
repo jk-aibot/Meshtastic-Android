@@ -89,6 +89,7 @@ import org.meshtastic.core.resources.firmware_version
 import org.meshtastic.core.resources.local_network_permission
 import org.meshtastic.core.resources.local_network_permission_blocked_rationale
 import org.meshtastic.core.resources.local_network_permission_rationale
+import org.meshtastic.core.resources.must_set_region
 import org.meshtastic.core.resources.no_device_selected
 import org.meshtastic.core.resources.open_bluetooth_settings
 import org.meshtastic.core.resources.open_location_settings
@@ -353,6 +354,14 @@ fun ConnectionsScreen(
             rssiLabel = stringResource(Res.string.rssi),
             disconnectLabel = stringResource(Res.string.disconnect),
             firmwareVersion = firmwareVersion,
+            // Resolved here (outside AnimatedContent) per the CMP-6615 workaround above, and persistent: the
+            // region warning must survive the connecting→connected card crossfade instead of flashing once.
+            regionWarningLabel =
+            if (connectionStatus == ConnectionStatus.MUST_SET_REGION) {
+                stringResource(Res.string.must_set_region)
+            } else {
+                null
+            },
         )
 
     Scaffold(
