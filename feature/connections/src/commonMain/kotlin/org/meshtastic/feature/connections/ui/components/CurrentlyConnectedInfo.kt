@@ -78,6 +78,7 @@ data class CurrentlyConnectedText(
     val rssiLabel: String,
     val disconnectLabel: String,
     val firmwareVersion: String?,
+    val regionWarningLabel: String? = null,
 )
 
 @Suppress("LoopWithTooManyJumpStatements", "TooGenericExceptionCaught")
@@ -145,8 +146,17 @@ fun CurrentlyConnectedInfo(
             }
         }
 
+        // Persistent connection-health notice. Without this the region warning only ever rendered on the
+        // connecting card, so it appeared for a split second during the card crossfade and vanished.
+        text.regionWarningLabel?.let { RegionWarningText(it) }
+
         DisconnectButton(onClick = onClickDisconnect, label = text.disconnectLabel)
     }
+}
+
+@Composable
+private fun RegionWarningText(warning: String) {
+    Text(text = warning, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
 }
 
 @Suppress("MagicNumber", "UnusedPrivateMember")
