@@ -156,6 +156,57 @@ class ConnectionsViewModelTest {
     }
 
     @Test
+    fun `MUST_SET_REGION waits for node info so the connected card never flashes the region warning`() = runTest {
+        val configFlow = MutableStateFlow(LocalConfig())
+        every { radioConfigRepository.localConfigFlow } returns configFlow
+        val vm = newViewModel()
+
+        vm.connectionStatus.test {
+            assertEquals(ConnectionStatus.NOT_CONNECTED, awaitItem())
+
+            // Region known to be UNSET before the transport is up, then the transport reports Connected
+            // while node info is still in flight (the real handshake ordering).
+            configFlow.value = LocalConfig(lora = Config.LoRaConfig(region = Config.LoRaConfig.RegionCode.UNSET))
+            serviceRepository.setConnectionState(ConnectionState.Connected)
+            advanceUntilIdle()
+
+            // Drain first, then assert on the settled value: with no node info yet the status must hold at
+            // CONNECTED (the screen is still on the connecting card) instead of flashing
+            // "You must set a region!" during the node-info window.
+            assertEquals(ConnectionStatus.CONNECTED, vm.connectionStatus.value)
+
+            // Node info arrives: now the unset region is surfaced.
+            nodeRepository.setOurNode(
+                org.meshtastic.core.model.Node(num = 1, user = User(hw_model = HardwareModel.TBEAM)),
+            )
+            advanceUntilIdle()
+            assertEquals(ConnectionStatus.MUST_SET_REGION, vm.connectionStatus.value)
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `Connected with region set maps to CONNECTED even before node info arrives`() = runTest {
+        val configFlow =
+            MutableStateFlow(LocalConfig(lora = Config.LoRaConfig(region = Config.LoRaConfig.RegionCode.US)))
+        every { radioConfigRepository.localConfigFlow } returns configFlow
+        val vm = newViewModel()
+
+        vm.connectionStatus.test {
+            assertEquals(ConnectionStatus.NOT_CONNECTED, awaitItem())
+
+            serviceRepository.setConnectionState(ConnectionState.Connected)
+            advanceUntilIdle()
+
+            // Region is set: no warning is due, node info or not.
+            assertEquals(ConnectionStatus.CONNECTED, vm.connectionStatus.value)
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
     fun `Disconnected with Reconnecting progress maps to RECONNECTING`() = runTest {
         viewModel.connectionStatus.test {
             // Initial value from stateInWhileSubscribed.
