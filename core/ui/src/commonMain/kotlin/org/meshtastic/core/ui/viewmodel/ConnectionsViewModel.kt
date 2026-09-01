@@ -155,13 +155,19 @@ class ConnectionsViewModel(
 
     /**
      * Single source of truth for the UI's "connection status" pill/banner. Derived from [connectionState],
-     * [ServiceRepository.connectionProgress], and [regionUnset]; kept here rather than in the composable so the mapping
-     * is observable and testable.
+     * [ServiceRepository.connectionProgress], [regionUnset], and [nodeRepository.ourNodeInfo]; kept here rather than in
+     * the composable so the mapping is observable and testable.
      *
      * The [ConnectionStatus.RECONNECTING] case is signalled by the WiFi/TCP handshake watchdog writing
      * [ServiceRepository.RECONNECTING_PROGRESS_TEXT] to [ServiceRepository.connectionProgress] immediately before its
      * recovery sibling transitions to [ConnectionState.Disconnected]. See
      * [ServiceRepository.RECONNECTING_PROGRESS_TEXT] for the cross-track contract.
+     *
+     * [ConnectionStatus.MUST_SET_REGION] additionally requires node info to have arrived: node info is the last piece
+     * of the handshake to land, and until it does the connections screen is still showing the connecting card. Emitting
+     * the region warning before that would flash "You must set a region!" for the window between the transport
+     * reporting Connected and the node-info read completing; the region notice belongs after node info, when the user
+     * can act on it.
      */
     val connectionStatus: StateFlow<ConnectionStatus> =
         combine(
@@ -169,10 +175,11 @@ class ConnectionsViewModel(
             regionUnset,
             serviceRepository.connectionProgress,
             nodeRestartTracker.restartExpected,
-        ) { state, unset, progress, restartExpected ->
+            nodeRepository.ourNodeInfo,
+        ) { state, unset, progress, restartExpected, ourNode ->
             when (state) {
                 is ConnectionState.Connected ->
-                    if (unset) ConnectionStatus.MUST_SET_REGION else ConnectionStatus.CONNECTED
+                    if (unset && ourNode != null) ConnectionStatus.MUST_SET_REGION else ConnectionStatus.CONNECTED
 
                 // While an expected node restart is in flight, the drop and the reconnect attempts are the restart
                 // —
