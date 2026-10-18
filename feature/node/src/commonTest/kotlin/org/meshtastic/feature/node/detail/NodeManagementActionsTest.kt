@@ -24,6 +24,7 @@ import dev.mokkery.everySuspend
 import dev.mokkery.matcher.any
 import dev.mokkery.mock
 import dev.mokkery.verify
+import dev.mokkery.verify.VerifyMode.Companion.exactly
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
@@ -33,6 +34,7 @@ import org.meshtastic.core.repository.LocalNodeUnavailableException
 import org.meshtastic.core.repository.PacketQueueRejectedException
 import org.meshtastic.core.repository.PlatformAnalytics
 import org.meshtastic.core.repository.RadioController
+import org.meshtastic.core.resources.UiText
 import org.meshtastic.core.testing.FakeNodeRepository
 import org.meshtastic.core.testing.FakeRadioController
 import org.meshtastic.core.ui.util.AlertManager
@@ -41,6 +43,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -52,7 +55,13 @@ class NodeManagementActionsTest {
     private val snackbarManager = RecordingSnackbarManager()
     private val testDispatcher = StandardTestDispatcher()
     private val testScope = TestScope(testDispatcher)
-    private val resolveUiText = resolveNodeRequestFailureUiText
+    private val anyResourceResolveUiText: suspend (UiText) -> String = { text ->
+        when (text) {
+            is UiText.DynamicString -> text.value
+            is UiText.Resource -> "Remove all ${text.args.firstOrNull()} unheard nodes?"
+        }
+    }
+
     private val analytics = mock<PlatformAnalytics>(MockMode.autofill)
 
     private val actions = actionsWith(radioController, alertManager)
@@ -63,13 +72,17 @@ class NodeManagementActionsTest {
         snackbarManager.messages.clear()
     }
 
-    private fun actionsWith(radio: RadioController, alerts: AlertManager) = NodeManagementActions(
+    private fun actionsWith(
+        radio: RadioController,
+        alerts: AlertManager,
+        resolver: suspend (UiText) -> String = resolveNodeRequestFailureUiText,
+    ) = NodeManagementActions(
         nodeRepository = nodeRepository,
         radioController = radio,
         alertManager = alerts,
         analytics = analytics,
         snackbarManager = snackbarManager,
-        resolveUiText = resolveUiText,
+        resolveUiText = resolver,
     )
 
     @Test
@@ -91,6 +104,51 @@ class NodeManagementActionsTest {
                 choices = any(),
             )
         }
+    }
+
+    @Test
+    fun requestRemoveNodes_shows_exactly_one_alert_for_the_whole_batch() {
+        val nodes = batchNodes(111, 222, 333)
+        val batchActions = actionsWith(radioController, alertManager, anyResourceResolveUiText)
+
+        batchActions.requestRemoveNodes(testScope, nodes)
+        testScope.runCurrent()
+
+        verify(exactly(1)) {
+            alertManager.showAlert(
+                titleRes = any(),
+                message = any(),
+                onConfirm = any(),
+                onDismiss = any(),
+                confirmText = any(),
+                confirmTextRes = any(),
+                dismissText = any(),
+                dismissTextRes = any(),
+                choices = any(),
+            )
+        }
+    }
+
+    @Test
+    fun requestRemoveNodes_removes_every_node_after_single_confirmation() {
+        val nodes = batchNodes(111, 222, 333)
+        val realAlertManager = AlertManager()
+        val batchActions = actionsWith(radioController, realAlertManager, anyResourceResolveUiText)
+        nodeRepository.setNodes(nodes)
+
+        batchActions.requestRemoveNodes(testScope, nodes)
+        testScope.runCurrent()
+
+        val alert = assertNotNull(realAlertManager.currentAlert.value)
+
+        alert.onConfirm?.invoke()
+        testScope.runCurrent()
+
+        nodes.forEach { node -> assertFalse(nodeRepository.nodeDBbyNum.value.containsKey(node.num)) }
+    }
+
+    private fun batchNodes(vararg nums: Int) = nums.map { num ->
+        Node(num = num, user = User.Builder().also { wb -> wb.long_name = "Node $num" }.build())
     }
 
     @Test

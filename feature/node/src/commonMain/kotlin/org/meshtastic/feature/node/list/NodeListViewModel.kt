@@ -51,7 +51,7 @@ import org.meshtastic.feature.node.domain.usecase.GetFilteredNodesUseCase
 import org.meshtastic.proto.ChannelSet
 import org.meshtastic.proto.Config
 
-@Suppress("LongParameterList")
+@Suppress("LongParameterList", "TooManyFunctions")
 @KoinViewModel
 class NodeListViewModel(
     private val savedStateHandle: SavedStateHandle,
@@ -246,6 +246,9 @@ class NodeListViewModel(
     fun muteNode(node: Node) = nodeManagementActions.requestMuteNode(viewModelScope, node)
 
     fun removeNode(node: Node) = nodeManagementActions.requestRemoveNode(viewModelScope, node)
+
+    /** Removes every given node behind a single confirmation dialog. */
+    fun removeNodes(nodes: List<Node>) = nodeManagementActions.requestRemoveNodes(viewModelScope, nodes)
 
     /** Returns the contact key for navigating to a direct message conversation with this node. */
     fun getDirectMessageRoute(node: Node): String {

@@ -347,7 +347,7 @@ fun NodeListScreen(
                         UnheardNodesBanner(
                             unheardNodes = unheardNodes,
                             onKeep = { viewModel.keepUnheardNodes(unheardNodes) },
-                            onRemoveAll = { unheardNodes.forEach(viewModel::removeNode) },
+                            onRemoveAll = { viewModel.removeNodes(unheardNodes) },
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
                         )
                         val filterPrefs = viewModel.nodeFilterPreferences

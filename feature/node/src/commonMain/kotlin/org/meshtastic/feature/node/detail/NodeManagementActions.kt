@@ -32,6 +32,7 @@ import org.meshtastic.core.repository.PlatformAnalytics
 import org.meshtastic.core.repository.RadioController
 import org.meshtastic.core.resources.Res
 import org.meshtastic.core.resources.UiText
+import org.meshtastic.core.resources.are_you_sure
 import org.meshtastic.core.resources.favorite
 import org.meshtastic.core.resources.favorite_add
 import org.meshtastic.core.resources.favorite_remove
@@ -41,6 +42,7 @@ import org.meshtastic.core.resources.ignore_remove
 import org.meshtastic.core.resources.mute_add
 import org.meshtastic.core.resources.mute_notifications
 import org.meshtastic.core.resources.mute_remove
+import org.meshtastic.core.resources.nodes_unheard_remove_confirm
 import org.meshtastic.core.resources.remove
 import org.meshtastic.core.resources.remove_node_text
 import org.meshtastic.core.resources.unmute
@@ -65,6 +67,20 @@ constructor(
                 launchRadioMutation(scope, "removeNode", onSuccess = onAfterRemove) { removeNode(node.num) }
             },
         )
+    }
+
+    /** Shows ONE confirmation for the whole batch, then removes every node in a single radio mutation. */
+    open fun requestRemoveNodes(scope: CoroutineScope, nodes: List<Node>) {
+        scope.launch {
+            val message = resolveUiText(UiText.Resource(Res.string.nodes_unheard_remove_confirm, nodes.size))
+            alertManager.showAlert(
+                titleRes = Res.string.are_you_sure,
+                message = message,
+                onConfirm = {
+                    launchRadioMutation(scope, "removeNodes") { nodes.forEach { removeNode(it.num) } }
+                },
+            )
+        }
     }
 
     open suspend fun removeNode(nodeNum: Int) {

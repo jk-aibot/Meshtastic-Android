@@ -1375,6 +1375,7 @@
     <string name="nodes_unheard_banner_one">1 node not heard on your current LoRa settings</string>
     <string name="nodes_unheard_keep">Keep</string>
     <string name="nodes_unheard_remove">Remove</string>
+    <string name="nodes_unheard_remove_confirm">Remove all %1$d nodes not heard on your current LoRa settings? This action cannot be undone.</string>
     <string name="noise_floor">Noise Floor</string>
     <string name="noise_floor_definition">The background RF noise measured by the radio receiver. Lower values usually indicate a quieter receiver environment; -85 dBm is a busy reference point, not a hard failure threshold.</string>
     <string name="noise_floor_no_reading">Noise Floor: No reading</string>
